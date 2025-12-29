@@ -47,9 +47,6 @@ Rewrite only a specific range of commits. Useful for cleaning up a feature branc
 # Rewrite ONLY the last commit (equivalent to git commit --amend)
 git-bard head
 
-# Rewrite the last commit using range syntax
-git-bard HEAD~1..
-
 # Rewrite the last 5 commits
 git-bard HEAD~5..HEAD
 
