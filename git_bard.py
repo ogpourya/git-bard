@@ -7,7 +7,13 @@ from time import sleep
 
 # --- CONFIGURATION ---
 API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL_NAME = "gemini-3-flash-preview"
+
+MODEL_NAME = os.getenv("GEMINI_API_MODEL")
+if not MODEL_NAME:
+    MODEL_NAME = "gemini-3-flash-preview"
+    print(f"ℹ️  Using default model: {MODEL_NAME} (Set GEMINI_API_MODEL to override)")
+else:
+    print(f"ℹ️  Using configured model: {MODEL_NAME}")
 
 def get_git_output(command):
     """Runs a git command and returns the output as a list of strings."""

@@ -25,6 +25,12 @@ Set your API key:
 export GEMINI_API_KEY="your_key_here"
 ```
 
+Optionally, set a specific model (defaults to `gemini-3-flash-preview`):
+
+```
+export GEMINI_API_MODEL="gemini-1.5-pro-latest"
+```
+
 ### 1. The "0 to Hero" Mode (Default)
 
 Rewrite **every** commit in the repository history, starting from the first commit.
