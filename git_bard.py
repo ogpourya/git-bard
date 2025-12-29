@@ -93,8 +93,16 @@ def main():
     all_initial_commits = get_all_commits()
     
     if args.commit_range:
-        print(f"📜 Analyzing range: {args.commit_range}")
-        target_hashes = get_commits_in_range(args.commit_range)
+        if args.commit_range.lower() == "head":
+            print("📜 'head' detected. Targeting only the latest commit.")
+            if not all_initial_commits:
+                print("❌ No commits found in repository.")
+                sys.exit(1)
+            target_hashes = [all_initial_commits[-1]]
+        else:
+            print(f"📜 Analyzing range: {args.commit_range}")
+            target_hashes = get_commits_in_range(args.commit_range)
+
         if not target_hashes:
             print("❌ No commits found in that range.")
             sys.exit(1)

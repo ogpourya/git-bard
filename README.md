@@ -14,7 +14,7 @@
 ## Installation with `uv`
 
 ```
-cd /tmp && git clone https://github.com/ogpourya/git-bard.git && uv tool install git-bard/ && rm -rf git-bard && cd -
+uv tool install https://github.com/ogpourya/git-bard.git
 ```
 
 ## Usage
@@ -38,7 +38,10 @@ git-bard
 Rewrite only a specific range of commits. Useful for cleaning up a feature branch before merging.
 
 ```
-# Rewrite the last commit
+# Rewrite ONLY the last commit (equivalent to git commit --amend)
+git-bard head
+
+# Rewrite the last commit using range syntax
 git-bard HEAD~1..
 
 # Rewrite the last 5 commits
