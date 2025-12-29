@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="git-bard",
-    version="0.1.0",
+    version="1.0.0",
     py_modules=["git_bard"],
     install_requires=[
         "google-genai",
