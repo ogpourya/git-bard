@@ -7,13 +7,7 @@ from time import sleep
 
 # --- CONFIGURATION ---
 API_KEY = os.getenv("GEMINI_API_KEY")
-
-MODEL_NAME = os.getenv("GEMINI_API_MODEL")
-if not MODEL_NAME:
-    MODEL_NAME = "gemini-3-flash-preview"
-    print(f"ℹ️  Using default model: {MODEL_NAME} (Set GEMINI_API_MODEL to override)")
-else:
-    print(f"ℹ️  Using configured model: {MODEL_NAME}")
+MODEL_NAME = os.getenv("GEMINI_API_MODEL") or "gemini-3-flash-preview"
 
 def get_git_output(command):
     """Runs a git command and returns the output as a list of strings."""
@@ -88,14 +82,14 @@ def main():
     client = genai.Client(api_key=API_KEY)
     
     print("🎻 Git Bard: Tuning instruments...")
+    if os.getenv("GEMINI_API_MODEL"):
+        print(f"ℹ️  Using configured model: {MODEL_NAME}")
+    else:
+        print(f"ℹ️  Using default model: {MODEL_NAME} (Set GEMINI_API_MODEL to override)")
+
     check_dependencies()
 
     # 1. Determine targets
-    # We need to map the requested range to INDICES. 
-    # Why? Because rewriting commit #5 changes the hash of commit #6. 
-    # Validating targets by Hash is impossible after the rewrite starts.
-    # Validating by Index (relative to root) is stable for linear rewrites.
-    
     all_initial_commits = get_all_commits()
     
     if args.commit_range:
@@ -104,22 +98,23 @@ def main():
             if not all_initial_commits:
                 print("❌ No commits found in repository.")
                 sys.exit(1)
-            target_hashes = [all_initial_commits[-1]]
+            target_indices = [len(all_initial_commits) - 1]
         else:
             print(f"📜 Analyzing range: {args.commit_range}")
             target_hashes = get_commits_in_range(args.commit_range)
 
-        if not target_hashes:
-            print("❌ No commits found in that range.")
-            sys.exit(1)
+            if not target_hashes:
+                print("❌ No commits found in that range.")
+                sys.exit(1)
+                
+            # Map hashes to indices
+            target_indices = []
+            for h in target_hashes:
+                if h in all_initial_commits:
+                    target_indices.append(all_initial_commits.index(h))
             
-        # Map hashes to indices
-        target_indices = []
-        for h in target_hashes:
-            if h in all_initial_commits:
-                target_indices.append(all_initial_commits.index(h))
-        
-        target_indices.sort()
+            target_indices.sort()
+
         if not target_indices:
             print("❌ Could not map range hashes to current history indices.")
             sys.exit(1)
