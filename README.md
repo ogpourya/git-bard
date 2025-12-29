@@ -59,4 +59,7 @@ git-bard origin/main..HEAD
 
 ## Safety
 
-This tool performs a destructive action (`git filter-branch` / rebase logic via `cmsg`).
+This tool rewrites git history using `cmsg` (which uses rebase logic).
+
+*   **`git-bard head`**: Safe to use on your latest local commit (equivalent to `git commit --amend`).
+*   **Ranges/All**: Rewriting past commits changes their hashes. Avoid using this on commits already pushed to a shared repository unless you intend to force-push and coordinate with your team.
