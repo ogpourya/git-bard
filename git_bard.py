@@ -2,42 +2,60 @@ import subprocess
 import os
 import sys
 import argparse
-from google import genai
+import shutil
 from time import sleep
 
 # --- CONFIGURATION ---
 API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = os.getenv("GEMINI_API_MODEL") or "gemini-3-flash-preview"
+MAX_DIFF_CHARS = 50000
+
+def run(cmd, **kwargs):
+    """Run a command and return CompletedProcess. Avoid shell=True when possible."""
+    return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, **kwargs)
+
+def is_git_repo():
+    """Return True if current dir is inside a git repo."""
+    return run(["git", "rev-parse", "--git-dir"]).returncode == 0
+
+def is_working_tree_clean():
+    """Return True if no staged or unstaged changes exist."""
+    res = run(["git", "status", "--porcelain"])
+    if res.returncode != 0:
+        # treat errors as not clean so caller can choose to abort
+        return False
+    return res.stdout.strip() == ""
 
 def get_git_output(command):
-    """Runs a git command and returns the output as a list of strings."""
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        # Don't exit immediately on git errors, let the caller handle empty lists if needed
-        # but print error for visibility
-        print(f"⚠️  Git warning/error: {result.stderr.strip()}")
+    """Runs a git command (list form or string) and returns lines list, empty list on error."""
+    res = run(command)
+    if res.returncode != 0:
+        # print small warning for visibility but do not explode
+        err = res.stderr.strip()
+        if err:
+            print(f"⚠️  Git warning/error: {err}")
         return []
-    return result.stdout.strip().split('\n')
+    out = res.stdout.strip()
+    return out.splitlines() if out else []
 
 def get_all_commits():
-    """Returns a list of all commit hashes in the current branch (Oldest -> Newest)."""
-    hashes = get_git_output("git log --reverse --pretty=format:'%H'")
-    return [h for h in hashes if h]
+    """List all commits oldest first."""
+    return [h for h in get_git_output(["git", "log", "--reverse", "--pretty=format:%H"]) if h]
 
 def get_commits_in_range(range_spec):
-    """Returns a list of commit hashes within the specified range."""
-    # If no range, git log returns everything, but we handle that in main
-    cmd = f"git log --reverse --pretty=format:'%H' {range_spec}"
-    hashes = get_git_output(cmd)
-    return [h for h in hashes if h]
+    """List commits in the given range (oldest first)."""
+    return [h for h in get_git_output(f"git log --reverse --pretty=format:%H {range_spec}") if h]
 
 def get_commit_diff(commit_hash):
-    """Gets the diff and metadata for a specific commit."""
-    result = subprocess.run(f"git show {commit_hash}", shell=True, capture_output=True, text=True)
-    return result.stdout[:50000]
+    """Return a bounded amount of git show output for the commit."""
+    res = run(["git", "show", commit_hash])
+    if res.returncode != 0:
+        print(f"⚠️  Could not get diff for {commit_hash[:7]}")
+        return ""
+    return res.stdout[:MAX_DIFF_CHARS]
 
 def generate_conventional_message(client, diff_content):
-    """Sends the diff to Gemini to get a conventional commit message."""
+    """Ask Gemini for a conventional commit message. Caller provides a ready client."""
     prompt = (
         "You are a strict code reviewer. Analyze the following git diff and commit metadata.\n"
         "Write a single, professional 'Conventional Commit' message for this change.\n"
@@ -52,109 +70,120 @@ def generate_conventional_message(client, diff_content):
     )
 
     try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt
-        )
-        if response.text:
+        response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+        if getattr(response, "text", None):
             return response.text.strip().replace('"', '').replace("`", "")
         return "chore: updated code (empty response)"
     except Exception as e:
         print(f"⚠️ API Error: {e}")
         return "chore: updated code (api error fallback)"
 
-def check_dependencies():
-    """Checks if cmsg is installed."""
-    if subprocess.run("which cmsg", shell=True, capture_output=True).returncode != 0:
+def check_cmsg_installed():
+    if shutil.which("cmsg") is None:
         print("❌ Error: 'cmsg' tool not found.")
         print("   Please install it: https://github.com/ogpourya/cmsg")
         sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description="Rewrite git history with AI-generated conventional commit messages.")
-    parser.add_argument("commit_range", nargs="?", help="Git commit range (e.g., HEAD~5..HEAD, origin/main..HEAD). Defaults to ALL commits (0 to hero).")
+    parser.add_argument("commit_range", nargs="?", help="Git commit range (e.g., HEAD~5..HEAD, origin/main..HEAD). Defaults to ALL commits.")
+    parser.add_argument("--allow-dirty", action="store_true", help="Allow running when working tree is dirty.")
     args = parser.parse_args()
+
+    # Fast preflight checks that should exit quickly
+    if not is_git_repo():
+        print("🛑 Not a git repository. Aborting.")
+        sys.exit(1)
+
+    if not args.allow_dirty and not is_working_tree_clean():
+        print("🛑 Working tree is not clean. Stash or commit changes, or run with --allow-dirty.")
+        sys.exit(1)
+
+    check_cmsg_installed()
+
+    # Delay importing the heavy genai until we have validated the environment
+    try:
+        from google import genai
+    except Exception as e:
+        print(f"🛑 Failed to import Gemini client library: {e}")
+        print("   Make sure the library is installed and importable.")
+        sys.exit(1)
 
     if not API_KEY:
         print("🛑 Please set the GEMINI_API_KEY environment variable.")
         sys.exit(1)
 
     client = genai.Client(api_key=API_KEY)
-    
+
     print("🎻 Git Bard: Tuning instruments...")
     if os.getenv("GEMINI_API_MODEL"):
         print(f"ℹ️  Using configured model: {MODEL_NAME}")
     else:
         print(f"ℹ️  Using default model: {MODEL_NAME} (Set GEMINI_API_MODEL to override)")
 
-    check_dependencies()
-
-    # 1. Determine targets
+    # Determine targets
     all_initial_commits = get_all_commits()
-    
+    if not all_initial_commits:
+        print("❌ No commits found in repository.")
+        sys.exit(1)
+
     if args.commit_range:
         if args.commit_range.lower() == "head":
             print("📜 'head' detected. Targeting only the latest commit.")
-            if not all_initial_commits:
-                print("❌ No commits found in repository.")
-                sys.exit(1)
             target_indices = [len(all_initial_commits) - 1]
         else:
             print(f"📜 Analyzing range: {args.commit_range}")
             target_hashes = get_commits_in_range(args.commit_range)
-
             if not target_hashes:
                 print("❌ No commits found in that range.")
                 sys.exit(1)
-                
-            # Map hashes to indices
+            # Map hashes to indices in the baseline history
             target_indices = []
             for h in target_hashes:
-                if h in all_initial_commits:
-                    target_indices.append(all_initial_commits.index(h))
-            
+                try:
+                    idx = all_initial_commits.index(h)
+                    target_indices.append(idx)
+                except ValueError:
+                    # hash not in baseline history, will handle later
+                    pass
             target_indices.sort()
-
-        if not target_indices:
-            print("❌ Could not map range hashes to current history indices.")
-            sys.exit(1)
+            if not target_indices:
+                print("❌ Could not map range hashes to current history indices.")
+                sys.exit(1)
     else:
-        print("📜 No range specified. Selecting ALL commits (From 0 to Hero mode).")
+        print("📜 No range specified. Selecting ALL commits.")
         target_indices = list(range(len(all_initial_commits)))
 
     total_ops = len(target_indices)
     print(f"🚀 Ready to rewrite {total_ops} commits.\n")
 
-    # 2. Iterate through the calculated indices
     for step, index in enumerate(target_indices):
-        # Always fetch fresh history because hashes changed in previous iteration
         current_history = get_all_commits()
-        
         if index >= len(current_history):
             print(f"⚠️ Index {index} is out of bounds (history shortened?). Skipping.")
             continue
-            
-        target_hash = current_history[index]
-        
-        print(f"[{step+1}/{total_ops}] Processing history index {index} (Current Hash: {target_hash[:7]})...")
 
-        # Get diff & Generate
+        target_hash = current_history[index]
+        print(f"[{step+1}/{total_ops}] Processing history index {index} (hash {target_hash[:7]})...")
+
         diff = get_commit_diff(target_hash)
+        if not diff:
+            print("   ⚠️ Empty diff, skipping.")
+            continue
+
         print("   ✨ Composing ballad...")
         new_msg = generate_conventional_message(client, diff)
         print(f"   📝 New Message: {new_msg}")
 
-        # Rewrite
         print(f"   🔨 Reforging {target_hash[:7]}...")
-        proc = subprocess.run(["cmsg", "-c", target_hash, "-m", new_msg], text=True)
-        
+        proc = run(["cmsg", "-c", target_hash, "-m", new_msg])
         if proc.returncode != 0:
             print(f"❌ cmsg failed at index {index}. Stopping to prevent corruption.")
             print("   You may need to run 'git rebase --abort' or fix conflicts manually.")
             sys.exit(1)
-        
+
         print("   ✅ Success.\n")
-        sleep(0.5)
+        sleep(0.25)
 
     print("\n🎉 The saga is complete. Force push when ready!")
 
