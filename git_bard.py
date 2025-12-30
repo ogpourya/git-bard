@@ -212,7 +212,17 @@ def main():
         print("   ✅ Success.\n")
         sleep(0.25)
 
-    print("\n🎉 The saga is complete. Force push when ready!")
+    print("\n🎉 The saga is complete.")
+    confirm = input("Would you like to force push the changes? (type 'yes' to confirm): ")
+    if confirm == "yes":
+        print("🚀 Pushing to remote...")
+        res = run(["git", "push", "--force"])
+        if res.returncode == 0:
+            print("✅ Successfully force pushed.")
+        else:
+            print(f"❌ Force push failed:\n{res.stderr}")
+    else:
+        print("👌 Alright, no force push done. You can push manually if you want.")
 
 if __name__ == "__main__":
     main()
