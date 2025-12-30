@@ -163,6 +163,11 @@ def main():
     total_ops = len(target_indices)
     print(f"🚀 Ready to rewrite {total_ops} commits.\n")
 
+    confirm = input("Do you want to proceed with rewriting these commits? (y/N): ").lower()
+    if confirm != 'y':
+        print("Aborted.")
+        sys.exit(0)
+
     # We process from newest to oldest. 
     # cmsg uses rebase. Rewriting an old commit changes hashes of all descendant commits.
     # By going NEWEST to OLDEST, we modify a leaf, and its parents/ancestors 
