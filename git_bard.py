@@ -94,7 +94,6 @@ def check_cmsg_installed():
 def main():
     parser = argparse.ArgumentParser(description="Rewrite git history with AI-generated conventional commit messages.")
     parser.add_argument("commit_range", nargs="?", help="Git commit range (e.g., HEAD~5..HEAD, origin/main..HEAD). Defaults to ALL commits.")
-    parser.add_argument("--allow-dirty", action="store_true", help="Allow running when working tree is dirty.")
     args = parser.parse_args()
 
     # Fast preflight checks that should exit quickly
@@ -102,8 +101,8 @@ def main():
         print("🛑 Not a git repository. Aborting.")
         sys.exit(1)
 
-    if not args.allow_dirty and not is_working_tree_clean():
-        print("🛑 Working tree is not clean. Stash or commit changes, or run with --allow-dirty.")
+    if not is_working_tree_clean():
+        print("🛑 Working tree is not clean. Stash or commit changes.")
         sys.exit(1)
 
     check_cmsg_installed()
