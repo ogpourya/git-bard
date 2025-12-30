@@ -12,7 +12,7 @@ MAX_DIFF_CHARS = 50000
 
 def run(cmd, **kwargs):
     """Run a command and return CompletedProcess. Avoid shell=True when possible."""
-    return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, **kwargs)
+    return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, errors="replace", **kwargs)
 
 def is_git_repo():
     """Return True if current dir is inside a git repo."""
@@ -44,7 +44,7 @@ def get_all_commits():
 
 def get_commits_in_range(range_spec):
     """List commits in the given range (oldest first)."""
-    return [h for h in get_git_output(f"git log --reverse --pretty=format:%H {range_spec}") if h]
+    return [h for h in get_git_output(["git", "log", "--reverse", "--pretty=format:%H", range_spec]) if h]
 
 def get_commit_diff(commit_hash):
     """Return a bounded amount of git show output for the commit."""
@@ -54,7 +54,7 @@ def get_commit_diff(commit_hash):
         return ""
     return res.stdout[:MAX_DIFF_CHARS]
 
-def generate_conventional_message(client, diff_content):
+def generate_conventional_message(client, diff_content, retries=3):
     """Ask Gemini for a conventional commit message. Caller provides a ready client."""
     prompt = (
         "You are a strict code reviewer. Analyze the following git diff and commit metadata.\n"
@@ -69,14 +69,21 @@ def generate_conventional_message(client, diff_content):
         f"DIFF:\n{diff_content}"
     )
 
-    try:
-        response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
-        if getattr(response, "text", None):
-            return response.text.strip().replace('"', '').replace("`", "")
-        return "chore: updated code (empty response)"
-    except Exception as e:
-        print(f"⚠️ API Error: {e}")
-        return "chore: updated code (api error fallback)"
+    for attempt in range(retries):
+        try:
+            response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+            if getattr(response, "text", None):
+                text = response.text.strip().replace('"', '').replace("`", "")
+                if text:
+                    return text
+            print(f"   ⚠️ Empty response (attempt {attempt+1}/{retries})")
+        except Exception as e:
+            print(f"   ⚠️ API Error: {e} (attempt {attempt+1}/{retries})")
+        
+        if attempt < retries - 1:
+            sleep(2 ** attempt)  # exponential backoff
+    
+    return None
 
 def check_cmsg_installed():
     if shutil.which("cmsg") is None:
@@ -157,6 +164,13 @@ def main():
     total_ops = len(target_indices)
     print(f"🚀 Ready to rewrite {total_ops} commits.\n")
 
+    # We process from newest to oldest. 
+    # cmsg uses rebase. Rewriting an old commit changes hashes of all descendant commits.
+    # By going NEWEST to OLDEST, we modify a leaf, and its parents/ancestors 
+    # remain at the same index in the history (though their children's hashes changed).
+    target_indices.reverse()
+
+    start_range = args.commit_range or "ALL"
     for step, index in enumerate(target_indices):
         current_history = get_all_commits()
         if index >= len(current_history):
@@ -173,7 +187,21 @@ def main():
 
         print("   ✨ Composing ballad...")
         new_msg = generate_conventional_message(client, diff)
+        if new_msg is None:
+            print(f"\n❌ API failed after multiple retries.")
+            print(f"📊 Status Report:")
+            print(f"   - Starting Range: {start_range}")
+            print(f"   - Total Commits in Range: {total_ops}")
+            print(f"   - Successfully Processed: {step}")
+            print(f"   - Failed at Index: {index} (hash {target_hash[:7]})")
+            print(f"   - Remaining: {total_ops - step}")
+            sys.exit(1)
+            
         print(f"   📝 New Message: {new_msg}")
+
+        # Protect against messages starting with hyphen being interpreted as flags
+        if new_msg.startswith("-"):
+            new_msg = " " + new_msg
 
         print(f"   🔨 Reforging {target_hash[:7]}...")
         proc = run(["cmsg", "-c", target_hash, "-m", new_msg])
