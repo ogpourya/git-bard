@@ -57,6 +57,21 @@ git-bard origin/main..HEAD
 git-bard --yes
 ```
 
+### 3. Crazy Mode
+
+Use a single AI request for all commits instead of one request per commit. Faster but potentially less reliable for large histories.
+
+```
+# Rewrite all commits in one shot
+git-bard --crazy
+
+# Combine with range
+git-bard HEAD~10..HEAD --crazy
+
+# Full auto mode
+git-bard --crazy --yes
+```
+
 ## Safety
 
 This tool rewrites git history using `cmsg` (which uses rebase logic).

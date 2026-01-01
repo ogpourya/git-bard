@@ -5,32 +5,25 @@ import argparse
 import shutil
 from time import sleep
 
-# --- CONFIGURATION ---
 API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = os.getenv("GEMINI_API_MODEL") or "gemini-3-flash-preview"
 MAX_DIFF_CHARS = 50000
 
 def run(cmd, **kwargs):
-    """Run a command and return CompletedProcess. Avoid shell=True when possible."""
     return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, errors="replace", **kwargs)
 
 def is_git_repo():
-    """Return True if current dir is inside a git repo."""
     return run(["git", "rev-parse", "--git-dir"]).returncode == 0
 
 def is_working_tree_clean():
-    """Return True if no staged or unstaged changes exist."""
     res = run(["git", "status", "--porcelain"])
     if res.returncode != 0:
-        # treat errors as not clean so caller can choose to abort
         return False
     return res.stdout.strip() == ""
 
 def get_git_output(command):
-    """Runs a git command (list form or string) and returns lines list, empty list on error."""
     res = run(command)
     if res.returncode != 0:
-        # print small warning for visibility but do not explode
         err = res.stderr.strip()
         if err:
             print(f"[!] Git warning/error: {err}")
@@ -39,23 +32,29 @@ def get_git_output(command):
     return out.splitlines() if out else []
 
 def get_all_commits():
-    """List all commits oldest first."""
     return [h for h in get_git_output(["git", "log", "--reverse", "--pretty=format:%H"]) if h]
 
 def get_commits_in_range(range_spec):
-    """List commits in the given range (oldest first)."""
     return [h for h in get_git_output(["git", "log", "--reverse", "--pretty=format:%H", range_spec]) if h]
 
 def get_commit_diff(commit_hash):
-    """Return a bounded amount of git show output for the commit."""
     res = run(["git", "show", commit_hash])
     if res.returncode != 0:
         print(f"[!] Could not get diff for {commit_hash[:7]}")
         return ""
     return res.stdout[:MAX_DIFF_CHARS]
 
+def sanitize_commit_message(msg):
+    if not msg:
+        return None
+    msg = msg.replace('\r\n', '\n').replace('\r', '\n').split('\n')[0].strip()
+    msg = ''.join(c for c in msg if c.isprintable())
+    msg = msg[:200]
+    if not msg:
+        return None
+    return msg
+
 def generate_conventional_message(client, diff_content, retries=3):
-    """Ask Gemini for a conventional commit message. Caller provides a ready client."""
     prompt = (
         "You are a strict code reviewer. Analyze the following git diff and commit metadata.\n"
         "Write a single, professional 'Conventional Commit' message for this change.\n"
@@ -74,6 +73,7 @@ def generate_conventional_message(client, diff_content, retries=3):
             response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
             if getattr(response, "text", None):
                 text = response.text.strip().replace('"', '').replace("`", "")
+                text = sanitize_commit_message(text)
                 if text:
                     return text
             print(f"   [!] Empty response (attempt {attempt+1}/{retries})")
@@ -81,7 +81,60 @@ def generate_conventional_message(client, diff_content, retries=3):
             print(f"   [!] API Error: {e} (attempt {attempt+1}/{retries})")
         
         if attempt < retries - 1:
-            sleep(2 ** attempt)  # exponential backoff
+            sleep(2 ** attempt)
+    
+    return None
+
+def generate_batch_messages(client, commits_with_diffs, retries=3):
+    commit_sections = []
+    for i, (commit_hash, diff) in enumerate(commits_with_diffs):
+        commit_sections.append(f"=== COMMIT #{i+1} (hash: {commit_hash[:7]}) ===\n{diff}")
+    
+    all_diffs = "\n\n".join(commit_sections)
+    
+    prompt = (
+        "You are a strict code reviewer. Analyze the following git diffs for multiple commits.\n"
+        "Write a professional 'Conventional Commit' message for EACH commit.\n"
+        "Format for each: <type>: <description>\n"
+        "Allowed types: feat, fix, chore, docs, style, refactor, perf, test, ci, build.\n"
+        "Rules:\n"
+        "1. Keep each commit message under 72 characters.\n"
+        "2. Use lowercase for the description.\n"
+        "3. Do not end with a period.\n"
+        "4. Return ONLY the commit messages, one per line, in order.\n"
+        "5. Each line format: COMMIT#<number>: <message>\n"
+        "   Example: COMMIT#1: feat: add user authentication\n\n"
+        f"DIFFS:\n{all_diffs}"
+    )
+
+    for attempt in range(retries):
+        try:
+            response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+            if getattr(response, "text", None):
+                text = response.text.strip()
+                if text:
+                    messages = {}
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line.startswith("COMMIT#"):
+                            try:
+                                num_part, msg = line.split(": ", 1)
+                                num = int(num_part.replace("COMMIT#", ""))
+                                msg = sanitize_commit_message(msg.replace('"', '').replace("`", ""))
+                                if msg:
+                                    messages[num] = msg
+                            except (ValueError, IndexError):
+                                continue
+                    if len(messages) == len(commits_with_diffs):
+                        return messages
+                    print(f"   [!] Got {len(messages)}/{len(commits_with_diffs)} messages (attempt {attempt+1}/{retries})")
+            else:
+                print(f"   [!] Empty response (attempt {attempt+1}/{retries})")
+        except Exception as e:
+            print(f"   [!] API Error: {e} (attempt {attempt+1}/{retries})")
+        
+        if attempt < retries - 1:
+            sleep(2 ** attempt)
     
     return None
 
@@ -95,9 +148,9 @@ def main():
     parser = argparse.ArgumentParser(description="Rewrite git history with AI-generated conventional commit messages.")
     parser.add_argument("commit_range", nargs="?", help="Git commit range (e.g., HEAD~5..HEAD, origin/main..HEAD). Defaults to ALL commits.")
     parser.add_argument("--yes", action="store_true", help="Skip all confirmation prompts.")
+    parser.add_argument("--crazy", action="store_true", help="Use a single AI request for all commits (faster but less reliable).")
     args = parser.parse_args()
 
-    # Fast preflight checks that should exit quickly
     if not is_git_repo():
         print("[!] Not a git repository. Aborting.")
         sys.exit(1)
@@ -108,7 +161,6 @@ def main():
 
     check_cmsg_installed()
 
-    # Delay importing the heavy genai until we have validated the environment
     try:
         from google import genai
     except Exception as e:
@@ -128,7 +180,6 @@ def main():
     else:
         print(f"    - Model: {MODEL_NAME} (default)")
 
-    # Determine targets
     all_initial_commits = get_all_commits()
     if not all_initial_commits:
         print(f"\n[X] Error: No commits found.")
@@ -146,7 +197,6 @@ def main():
             if not target_hashes:
                 print(f"\n[X] Error: No commits in range.")
                 sys.exit(1)
-            # Map hashes to indices in the baseline history
             for h in target_hashes:
                 try:
                     idx = all_initial_commits.index(h)
@@ -173,49 +223,100 @@ def main():
             print("Aborted.")
             sys.exit(0)
 
-    # We process from newest to oldest. 
-    # cmsg uses rebase. Rewriting an old commit changes hashes of all descendant commits.
-    # By going NEWEST to OLDEST, we modify a leaf, and its parents/ancestors 
-    # remain at the same index in the history (though their children's hashes changed).
     target_indices.reverse()
 
-    start_range = args.commit_range or "ALL"
-    for step, index in enumerate(target_indices):
-        current_history = get_all_commits()
-        if index >= len(current_history):
-            print(f"[!] Index {index} is out of bounds (history shortened?). Skipping.")
-            continue
-
-        target_hash = current_history[index]
-        print(f"\n[{step+1}/{total_ops}] Commit {target_hash[:7]}")
-
-        diff = get_commit_diff(target_hash)
-        if not diff:
-            print("    [!] Empty diff, skipping.")
-            continue
-
-        print("    [*] Composing...", end="\r")
-        new_msg = generate_conventional_message(client, diff)
-        if new_msg is None:
-            print(f"\n    [X] API failure. Stopping.")
-            print(f"    [i] Progress saved. You may need to 'git rebase --abort' if a rebase is in progress.")
+    if args.crazy:
+        print("[!] CRAZY MODE: Fetching all diffs...")
+        
+        indices_oldest_first = list(reversed(target_indices))
+        
+        commits_with_diffs = []
+        for index in indices_oldest_first:
+            target_hash = all_initial_commits[index]
+            diff = get_commit_diff(target_hash)
+            if diff:
+                commits_with_diffs.append((index, target_hash, diff))
+        
+        if not commits_with_diffs:
+            print("[X] No valid diffs found.")
             sys.exit(1)
+        
+        prompt_data = [(h, d) for (_, h, d) in commits_with_diffs]
+        
+        print(f"[*] Composing {len(commits_with_diffs)} messages in one request...")
+        messages = generate_batch_messages(client, prompt_data)
+        if messages is None:
+            print("[X] API failure. Could not generate batch messages.")
+            sys.exit(1)
+        
+        missing = [i for i in range(1, len(commits_with_diffs) + 1) if not messages.get(i)]
+        if missing:
+            print(f"[X] API returned incomplete messages. Missing: {missing}")
+            sys.exit(1)
+        
+        print("[*] Applying messages (newest to oldest)...")
+        crazy_total = len(commits_with_diffs)
+        for step, (index, _, _) in enumerate(reversed(commits_with_diffs)):
+            msg_num = crazy_total - step
+            new_msg = messages[msg_num]
             
-        print(f"    [+] Message: {new_msg}")
+            current_history = get_all_commits()
+            if index >= len(current_history):
+                print(f"[X] Index {index} out of bounds. History corrupted?")
+                sys.exit(1)
+            
+            current_hash = current_history[index]
+            print(f"\n[{step+1}/{crazy_total}] Commit {current_hash[:7]}")
+            print(f"    [+] Message: {new_msg}")
+            
+            if new_msg.startswith("-"):
+                new_msg = " " + new_msg
+            
+            print(f"    [#] Reforging...", end="\r")
+            proc = run(["cmsg", "-c", current_hash, "-m", new_msg])
+            if proc.returncode != 0:
+                print(f"\n    [X] Rewrite failed at {current_hash[:7]}.")
+                print(f"    [i] Check 'git status'. You may need to 'git rebase --abort' or '--continue'.")
+                sys.exit(1)
+            
+            print("    [V] Success.   ")
+            sleep(0.1)
+    else:
+        for step, index in enumerate(target_indices):
+            current_history = get_all_commits()
+            if index >= len(current_history):
+                print(f"[!] Index {index} is out of bounds (history shortened?). Skipping.")
+                continue
 
-        # Protect against messages starting with hyphen being interpreted as flags
-        if new_msg.startswith("-"):
-            new_msg = " " + new_msg
+            target_hash = current_history[index]
+            print(f"\n[{step+1}/{total_ops}] Commit {target_hash[:7]}")
 
-        print(f"    [#] Reforging...", end="\r")
-        proc = run(["cmsg", "-c", target_hash, "-m", new_msg])
-        if proc.returncode != 0:
-            print(f"\n    [X] Rewrite failed at {target_hash[:7]}.")
-            print(f"    [i] Check 'git status'. You may need to 'git rebase --abort' or '--continue'.")
-            sys.exit(1)
+            diff = get_commit_diff(target_hash)
+            if not diff:
+                print("    [!] Empty diff, skipping.")
+                continue
 
-        print("    [V] Success.   ")
-        sleep(0.1)
+            print("    [*] Composing...", end="\r")
+            new_msg = generate_conventional_message(client, diff)
+            if new_msg is None:
+                print(f"\n    [X] API failure. Stopping.")
+                print(f"    [i] Progress saved. You may need to 'git rebase --abort' if a rebase is in progress.")
+                sys.exit(1)
+                
+            print(f"    [+] Message: {new_msg}")
+
+            if new_msg.startswith("-"):
+                new_msg = " " + new_msg
+
+            print(f"    [#] Reforging...", end="\r")
+            proc = run(["cmsg", "-c", target_hash, "-m", new_msg])
+            if proc.returncode != 0:
+                print(f"\n    [X] Rewrite failed at {target_hash[:7]}.")
+                print(f"    [i] Check 'git status'. You may need to 'git rebase --abort' or '--continue'.")
+                sys.exit(1)
+
+            print("    [V] Success.   ")
+            sleep(0.1)
 
     print(f"\n[!] The saga is complete.")
     if args.yes:
