@@ -94,7 +94,7 @@ def check_cmsg_installed():
 def main():
     parser = argparse.ArgumentParser(description="Rewrite git history with AI-generated conventional commit messages.")
     parser.add_argument("commit_range", nargs="?", help="Git commit range (e.g., HEAD~5..HEAD, origin/main..HEAD). Defaults to ALL commits.")
-    parser.add_argument("--yes", action="store_true", help="Automatically confirm force push.")
+    parser.add_argument("--yes", action="store_true", help="Skip all confirmation prompts.")
     args = parser.parse_args()
 
     # Fast preflight checks that should exit quickly
@@ -165,10 +165,13 @@ def main():
     total_ops = len(target_indices)
     print(f"    - Total:  {total_ops} commits\n")
 
-    confirm = input("[?] Proceed with rewrite? (y/N): ").lower()
-    if confirm != 'y':
-        print("Aborted.")
-        sys.exit(0)
+    if args.yes:
+        print("[*] Proceeding with rewrite (--yes)")
+    else:
+        confirm = input("[?] Proceed with rewrite? (y/N): ").lower()
+        if confirm != 'y':
+            print("Aborted.")
+            sys.exit(0)
 
     # We process from newest to oldest. 
     # cmsg uses rebase. Rewriting an old commit changes hashes of all descendant commits.

@@ -52,6 +52,9 @@ git-bard HEAD~5..HEAD
 
 # Rewrite everything on your branch that isn't on main
 git-bard origin/main..HEAD
+
+# Skip all confirmation prompts
+git-bard --yes
 ```
 
 ## Safety
