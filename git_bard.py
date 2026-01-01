@@ -33,7 +33,7 @@ def get_git_output(command):
         # print small warning for visibility but do not explode
         err = res.stderr.strip()
         if err:
-            print(f"⚠️  Git warning/error: {err}")
+            print(f"[!] Git warning/error: {err}")
         return []
     out = res.stdout.strip()
     return out.splitlines() if out else []
@@ -50,7 +50,7 @@ def get_commit_diff(commit_hash):
     """Return a bounded amount of git show output for the commit."""
     res = run(["git", "show", commit_hash])
     if res.returncode != 0:
-        print(f"⚠️  Could not get diff for {commit_hash[:7]}")
+        print(f"[!] Could not get diff for {commit_hash[:7]}")
         return ""
     return res.stdout[:MAX_DIFF_CHARS]
 
@@ -76,9 +76,9 @@ def generate_conventional_message(client, diff_content, retries=3):
                 text = response.text.strip().replace('"', '').replace("`", "")
                 if text:
                     return text
-            print(f"   ⚠️ Empty response (attempt {attempt+1}/{retries})")
+            print(f"   [!] Empty response (attempt {attempt+1}/{retries})")
         except Exception as e:
-            print(f"   ⚠️ API Error: {e} (attempt {attempt+1}/{retries})")
+            print(f"   [!] API Error: {e} (attempt {attempt+1}/{retries})")
         
         if attempt < retries - 1:
             sleep(2 ** attempt)  # exponential backoff
@@ -87,22 +87,23 @@ def generate_conventional_message(client, diff_content, retries=3):
 
 def check_cmsg_installed():
     if shutil.which("cmsg") is None:
-        print("❌ Error: 'cmsg' tool not found.")
+        print("[X] Error: 'cmsg' tool not found.")
         print("   Please install it: https://github.com/ogpourya/cmsg")
         sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description="Rewrite git history with AI-generated conventional commit messages.")
     parser.add_argument("commit_range", nargs="?", help="Git commit range (e.g., HEAD~5..HEAD, origin/main..HEAD). Defaults to ALL commits.")
+    parser.add_argument("--yes", action="store_true", help="Automatically confirm force push.")
     args = parser.parse_args()
 
     # Fast preflight checks that should exit quickly
     if not is_git_repo():
-        print("🛑 Not a git repository. Aborting.")
+        print("[!] Not a git repository. Aborting.")
         sys.exit(1)
 
     if not is_working_tree_clean():
-        print("🛑 Working tree is not clean. Stash or commit changes.")
+        print("[!] Working tree is not clean. Stash or commit changes.")
         sys.exit(1)
 
     check_cmsg_installed()
@@ -111,59 +112,60 @@ def main():
     try:
         from google import genai
     except Exception as e:
-        print(f"🛑 Failed to import Gemini client library: {e}")
+        print(f"[!] Failed to import Gemini client library: {e}")
         print("   Make sure the library is installed and importable.")
         sys.exit(1)
 
     if not API_KEY:
-        print("🛑 Please set the GEMINI_API_KEY environment variable.")
+        print("[!] Please set the GEMINI_API_KEY environment variable.")
         sys.exit(1)
 
     client = genai.Client(api_key=API_KEY)
 
-    print("🎻 Git Bard: Tuning instruments...")
+    print(f"\n[*] Git Bard: Tuning instruments...")
     if os.getenv("GEMINI_API_MODEL"):
-        print(f"ℹ️  Using configured model: {MODEL_NAME}")
+        print(f"    - Model: {MODEL_NAME}")
     else:
-        print(f"ℹ️  Using default model: {MODEL_NAME} (Set GEMINI_API_MODEL to override)")
+        print(f"    - Model: {MODEL_NAME} (default)")
 
     # Determine targets
     all_initial_commits = get_all_commits()
     if not all_initial_commits:
-        print("❌ No commits found in repository.")
+        print(f"\n[X] Error: No commits found.")
         sys.exit(1)
+
+    target_indices = []
 
     if args.commit_range:
         if args.commit_range.lower() == "head":
-            print("📜 'head' detected. Targeting only the latest commit.")
+            print(f"    - Target: Latest commit (HEAD)")
             target_indices = [len(all_initial_commits) - 1]
         else:
-            print(f"📜 Analyzing range: {args.commit_range}")
+            print(f"    - Range:  {args.commit_range}")
             target_hashes = get_commits_in_range(args.commit_range)
             if not target_hashes:
-                print("❌ No commits found in that range.")
+                print(f"\n[X] Error: No commits in range.")
                 sys.exit(1)
             # Map hashes to indices in the baseline history
-            target_indices = []
             for h in target_hashes:
                 try:
                     idx = all_initial_commits.index(h)
                     target_indices.append(idx)
                 except ValueError:
-                    # hash not in baseline history, will handle later
                     pass
             target_indices.sort()
-            if not target_indices:
-                print("❌ Could not map range hashes to current history indices.")
-                sys.exit(1)
     else:
-        print("📜 No range specified. Selecting ALL commits.")
+        print(f"    - Range:  All commits")
         target_indices = list(range(len(all_initial_commits)))
 
-    total_ops = len(target_indices)
-    print(f"🚀 Ready to rewrite {total_ops} commits.\n")
+    if not target_indices:
+        print(f"\n[X] Error: No valid commits found to process.")
+        sys.exit(1)
 
-    confirm = input("Do you want to proceed with rewriting these commits? (y/N): ").lower()
+    total_ops = len(target_indices)
+    print(f"    - Total:  {total_ops} commits\n")
+
+    confirm = input("[?] Proceed with rewrite? (y/N): ").lower()
     if confirm != 'y':
         print("Aborted.")
         sys.exit(0)
@@ -178,56 +180,55 @@ def main():
     for step, index in enumerate(target_indices):
         current_history = get_all_commits()
         if index >= len(current_history):
-            print(f"⚠️ Index {index} is out of bounds (history shortened?). Skipping.")
+            print(f"[!] Index {index} is out of bounds (history shortened?). Skipping.")
             continue
 
         target_hash = current_history[index]
-        print(f"[{step+1}/{total_ops}] Processing history index {index} (hash {target_hash[:7]})...")
+        print(f"\n[{step+1}/{total_ops}] Commit {target_hash[:7]}")
 
         diff = get_commit_diff(target_hash)
         if not diff:
-            print("   ⚠️ Empty diff, skipping.")
+            print("    [!] Empty diff, skipping.")
             continue
 
-        print("   ✨ Composing ballad...")
+        print("    [*] Composing...", end="\r")
         new_msg = generate_conventional_message(client, diff)
         if new_msg is None:
-            print(f"\n❌ API failed after multiple retries.")
-            print(f"📊 Status Report:")
-            print(f"   - Starting Range: {start_range}")
-            print(f"   - Total Commits in Range: {total_ops}")
-            print(f"   - Successfully Processed: {step}")
-            print(f"   - Failed at Index: {index} (hash {target_hash[:7]})")
-            print(f"   - Remaining: {total_ops - step}")
+            print(f"\n    [X] API failure. Stopping.")
+            print(f"    [i] Progress saved. You may need to 'git rebase --abort' if a rebase is in progress.")
             sys.exit(1)
             
-        print(f"   📝 New Message: {new_msg}")
+        print(f"    [+] Message: {new_msg}")
 
         # Protect against messages starting with hyphen being interpreted as flags
         if new_msg.startswith("-"):
             new_msg = " " + new_msg
 
-        print(f"   🔨 Reforging {target_hash[:7]}...")
+        print(f"    [#] Reforging...", end="\r")
         proc = run(["cmsg", "-c", target_hash, "-m", new_msg])
         if proc.returncode != 0:
-            print(f"❌ cmsg failed at index {index}. Stopping to prevent corruption.")
-            print("   You may need to run 'git rebase --abort' or fix conflicts manually.")
+            print(f"\n    [X] Rewrite failed at {target_hash[:7]}.")
+            print(f"    [i] Check 'git status'. You may need to 'git rebase --abort' or '--continue'.")
             sys.exit(1)
 
-        print("   ✅ Success.\n")
-        sleep(0.25)
+        print("    [V] Success.   ")
+        sleep(0.1)
 
-    print("\n🎉 The saga is complete.")
-    confirm = input("Would you like to force push the changes? (type 'yes' to confirm): ")
+    print(f"\n[!] The saga is complete.")
+    if args.yes:
+        confirm = "yes"
+    else:
+        confirm = input("[?] Force push changes? (type 'yes'): ")
+    
     if confirm == "yes":
-        print("🚀 Pushing to remote...")
+        print("[>] Pushing...")
         res = run(["git", "push", "--force"])
         if res.returncode == 0:
-            print("✅ Successfully force pushed.")
+            print("[V] Success.")
         else:
-            print(f"❌ Force push failed:\n{res.stderr}")
+            print(f"[X] Failed:\n{res.stderr}")
     else:
-        print("👌 Alright, no force push done. You can push manually if you want.")
+        print("[i] Skipped push.")
 
 if __name__ == "__main__":
     main()
